@@ -58,6 +58,13 @@ enum CategoryKind: String, CaseIterable, Identifiable {
     }
 }
 
+struct TitleWordToken: Identifiable, Hashable {
+    let normalizedWord: String
+    let displayWord: String
+
+    var id: String { normalizedWord }
+}
+
 @Model
 final class Transaction {
     @Attribute(.unique) var externalID: String
@@ -236,6 +243,43 @@ final class MatchingRule {
     }
 }
 
+@Model
+final class CategoryWordTag {
+    @Attribute(.unique) var normalizedWord: String
+    var displayWord: String
+    var createdAt: Date
+    var category: Category?
+
+    init(
+        normalizedWord: String,
+        displayWord: String,
+        category: Category? = nil,
+        createdAt: Date = .now
+    ) {
+        self.normalizedWord = normalizedWord
+        self.displayWord = displayWord
+        self.category = category
+        self.createdAt = createdAt
+    }
+}
+
+@Model
+final class IgnoredTitleWord {
+    @Attribute(.unique) var normalizedWord: String
+    var displayWord: String
+    var createdAt: Date
+
+    init(
+        normalizedWord: String,
+        displayWord: String,
+        createdAt: Date = .now
+    ) {
+        self.normalizedWord = normalizedWord
+        self.displayWord = displayWord
+        self.createdAt = createdAt
+    }
+}
+
 enum FinanceNormalizer {
     nonisolated static func comparableText(_ text: String) -> String {
         text
@@ -255,6 +299,55 @@ enum FinanceNormalizer {
 
     nonisolated static func accountKey(_ text: String) -> String {
         text.filter { $0.isNumber }
+    }
+
+    nonisolated static func normalizedTitleWord(_ text: String) -> String {
+        comparableText(text).replacingOccurrences(of: " ", with: "")
+    }
+
+    nonisolated static func titleWords(
+        from text: String,
+        ignoring ignoredWords: Set<String> = []
+    ) -> [TitleWordToken] {
+        guard text.isEmpty == false,
+              // Keep common in-word punctuation so merchants like E.ON stay as one token.
+              let expression = try? NSRegularExpression(pattern: "\\p{L}+(?:[.'’\\-]\\p{L}+)*", options: [])
+        else {
+            return []
+        }
+
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        var seenWords: Set<String> = []
+
+        return expression.matches(in: text, options: [], range: nsRange).compactMap { match in
+            guard let range = Range(match.range, in: text) else {
+                return nil
+            }
+
+            let rawWord = String(text[range])
+            let normalizedWord = normalizedTitleWord(rawWord)
+            guard normalizedWord.isEmpty == false,
+                  ignoredWords.contains(normalizedWord) == false,
+                  seenWords.insert(normalizedWord).inserted
+            else {
+                return nil
+            }
+
+            return TitleWordToken(
+                normalizedWord: normalizedWord,
+                displayWord: rawWord.uppercased(with: Locale(identifier: "sv_SE"))
+            )
+        }
+    }
+
+    nonisolated static var defaultIgnoredTitleWords: [String] {
+        [
+            "Kortköp",
+            "Reservation",
+            "Autogiro",
+            "Överföring",
+            "Swish"
+        ]
     }
 
     nonisolated static func merchantKey(title: String, fallbackName: String) -> String {
@@ -377,19 +470,10 @@ enum FinanceMath {
             guard interval?.contains(transaction.effectiveDate) == true else {
                 return
             }
-
-            switch category.kind {
-            case .expense:
-                guard transaction.amountCents < 0 else {
-                    return
-                }
-                total += abs(transaction.amountCents)
-            case .income:
-                guard transaction.amountCents > 0 else {
-                    return
-                }
-                total += transaction.amountCents
+            guard transaction.amountCents < 0 else {
+                return
             }
+            total += abs(transaction.amountCents)
         }
     }
 

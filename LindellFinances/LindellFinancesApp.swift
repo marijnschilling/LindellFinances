@@ -12,11 +12,12 @@ import SwiftData
 struct LindellFinancesApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
-            Item.self,
             Transaction.self,
             Category.self,
             MoneyPot.self,
             MatchingRule.self,
+            CategoryWordTag.self,
+            IgnoredTitleWord.self,
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 

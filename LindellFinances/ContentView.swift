@@ -44,10 +44,47 @@ private enum AppSection: String, CaseIterable, Identifiable {
     }
 }
 
+private struct DefaultCategorySeed {
+    let name: String
+    let kind: CategoryKind
+    let monthlyBudgetCents: Int
+}
+
+private let defaultCategorySeeds = [
+    DefaultCategorySeed(name: "🏡 House", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🛒 Groceries", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "☕️ Fika/Luch/Dinner", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "👶 Kids", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "💳 Subscriptions", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🛋️ Home", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🚗 Car", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🐈‍⬛ Cat", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "💊 Health", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🎡 Fun", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🛍️ Shopping", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🥡 Take-Out", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🏦 Bank", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🎁 Gifts", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "🏝️ Vacation", kind: .expense, monthlyBudgetCents: 0),
+    DefaultCategorySeed(name: "💰Savings", kind: .expense, monthlyBudgetCents: 0),
+]
+
+private let defaultCategoriesSeedKey = "default-categories-seeded-v3"
+private let ignoredTitleWordsSeedKey = "ignored-title-words-seeded"
+
+private let defaultCategoryOrder = Dictionary(
+    uniqueKeysWithValues: defaultCategorySeeds.enumerated().map { offset, seed in
+        (FinanceNormalizer.comparableText(seed.name), offset)
+    }
+)
+
 private func sortedCategories(_ categories: [Category]) -> [Category] {
     categories.sorted { lhs, rhs in
-        if lhs.kind != rhs.kind {
-            return lhs.kind == .income
+        let lhsDefaultOrder = defaultCategoryOrder[FinanceNormalizer.comparableText(lhs.name)] ?? Int.max
+        let rhsDefaultOrder = defaultCategoryOrder[FinanceNormalizer.comparableText(rhs.name)] ?? Int.max
+
+        if lhsDefaultOrder != rhsDefaultOrder {
+            return lhsDefaultOrder < rhsDefaultOrder
         }
 
         return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
@@ -72,6 +109,8 @@ struct ContentView: View {
     ) private var transactionsNeedingReview: [Transaction]
     @Query(sort: \Category.name) private var categories: [Category]
     @Query(sort: \MoneyPot.name) private var moneyPots: [MoneyPot]
+    @Query(sort: \CategoryWordTag.displayWord) private var categoryWordTags: [CategoryWordTag]
+    @Query(sort: \IgnoredTitleWord.displayWord) private var ignoredTitleWords: [IgnoredTitleWord]
 
     @State private var selectedSection: AppSection? = .dashboard
     @State private var showingImporter = false
@@ -107,10 +146,14 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(AppSection.allCases, selection: $selectedSection) { section in
-                Label(section.title, systemImage: section.icon)
-                    .tag(section as AppSection?)
+            List(selection: $selectedSection) {
+                ForEach(AppSection.allCases) { section in
+                    NavigationLink(value: section) {
+                        Label(section.title, systemImage: section.icon)
+                    }
+                }
             }
+            .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 210, ideal: 240)
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 12) {
@@ -178,8 +221,13 @@ struct ContentView: View {
                         CategoriesView(
                             categories: categories,
                             transactions: transactions,
+                            categoryWordTags: categoryWordTags,
+                            ignoredTitleWords: ignoredTitleWords,
                             onCreate: { openCategoryEditor(nil) },
-                            onEdit: openCategoryEditor
+                            onEdit: openCategoryEditor,
+                            onDeleteTag: deleteCategoryWordTag,
+                            onAddIgnoredWords: addIgnoredTitleWords,
+                            onDeleteIgnoredWord: deleteIgnoredTitleWord
                         )
                     case .moneyPots:
                         MoneyPotsView(
@@ -199,7 +247,7 @@ struct ContentView: View {
                     showingImporter = true
                 }
 
-                Button("New Category", systemImage: "tag.badge.plus") {
+                Button("New Category", systemImage: "tag") {
                     openCategoryEditor(nil)
                 }
 
@@ -219,20 +267,22 @@ struct ContentView: View {
                 transaction: transaction,
                 categories: categories,
                 moneyPots: moneyPots,
-                onSave: { categoryID, moneyPotID, note, ruleField in
+                categoryWordTags: categoryWordTags,
+                ignoredTitleWords: ignoredTitleWords,
+                onSave: { categoryID, moneyPotID, note, selectedTitleTags in
                     saveAssignments(
                         for: transaction,
                         categoryID: categoryID,
                         moneyPotID: moneyPotID,
                         note: note,
-                        createRuleFrom: ruleField
+                        selectedTitleTags: selectedTitleTags
                     )
                 }
             )
         }
         .sheet(isPresented: $showingCategoryEditor) {
-            CategoryEditorView(category: categoryEditorSeed) { name, kind, targetCents in
-                saveCategory(name: name, kind: kind, targetCents: targetCents)
+            CategoryEditorView(category: categoryEditorSeed) { name, targetCents in
+                saveCategory(name: name, targetCents: targetCents)
             }
         }
         .sheet(isPresented: $showingMoneyPotEditor) {
@@ -259,7 +309,7 @@ struct ContentView: View {
         } message: { message in
             Text(message)
         }
-        .onAppear(perform: presentReviewIfNeeded)
+        .onAppear(perform: handleAppear)
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 presentReviewIfNeeded()
@@ -293,6 +343,13 @@ struct ContentView: View {
         }
     }
 
+    private func handleAppear() {
+        removeIncomeDataIfNeeded()
+        seedDefaultCategoriesIfNeeded()
+        seedDefaultIgnoredTitleWordsIfNeeded()
+        presentReviewIfNeeded()
+    }
+
     private func openCategoryEditor(_ category: Category?) {
         categoryEditorSeed = category
         showingCategoryEditor = true
@@ -303,7 +360,7 @@ struct ContentView: View {
         showingMoneyPotEditor = true
     }
 
-    private func saveCategory(name: String, kind: CategoryKind, targetCents: Int) {
+    private func saveCategory(name: String, targetCents: Int) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmedName.isEmpty == false else {
             errorMessage = "Category name cannot be empty."
@@ -313,10 +370,10 @@ struct ContentView: View {
         do {
             if let category = categoryEditorSeed {
                 category.name = trimmedName
-                category.kind = kind
+                category.kind = .expense
                 category.monthlyBudgetCents = targetCents
             } else {
-                modelContext.insert(Category(name: trimmedName, kind: kind, monthlyBudgetCents: targetCents))
+                modelContext.insert(Category(name: trimmedName, kind: .expense, monthlyBudgetCents: targetCents))
             }
 
             try modelContext.save()
@@ -369,7 +426,7 @@ struct ContentView: View {
         categoryID: UUID?,
         moneyPotID: UUID?,
         note: String,
-        createRuleFrom field: MatchingField?
+        selectedTitleTags: [TitleWordToken]
     ) {
         do {
             transaction.category = categories.first(where: { $0.id == categoryID })
@@ -377,12 +434,11 @@ struct ContentView: View {
             transaction.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
             transaction.needsCategoryReview = transaction.category == nil
 
-            if let field, let pattern = rulePattern(for: transaction, field: field) {
-                try upsertRule(
-                    field: field,
-                    pattern: pattern,
-                    category: transaction.category,
-                    moneyPot: transaction.moneyPot
+            if let category = transaction.category {
+                try updateTitleTags(
+                    selectedWords: selectedTitleTags,
+                    from: transaction.title,
+                    for: category
                 )
             }
 
@@ -447,6 +503,288 @@ struct ContentView: View {
         }
     }
 
+    private func seedDefaultIgnoredTitleWordsIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: ignoredTitleWordsSeedKey) == false else {
+            return
+        }
+
+        do {
+            for defaultWord in FinanceNormalizer.defaultIgnoredTitleWords {
+                let normalizedWord = FinanceNormalizer.normalizedTitleWord(defaultWord)
+                guard normalizedWord.isEmpty == false else {
+                    continue
+                }
+
+                if try existingIgnoredTitleWord(normalizedWord: normalizedWord) == nil {
+                    modelContext.insert(
+                        IgnoredTitleWord(
+                            normalizedWord: normalizedWord,
+                            displayWord: defaultWord.uppercased(with: Locale(identifier: "sv_SE"))
+                        )
+                    )
+                }
+            }
+
+            try modelContext.save()
+            defaults.set(true, forKey: ignoredTitleWordsSeedKey)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func seedDefaultCategoriesIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: defaultCategoriesSeedKey) == false || categories.isEmpty else {
+            return
+        }
+
+        do {
+            let existingCategoryKeys = Set(categories.map { category in
+                FinanceNormalizer.comparableText(category.name)
+            })
+
+            for seed in defaultCategorySeeds {
+                let comparableName = FinanceNormalizer.comparableText(seed.name)
+                guard existingCategoryKeys.contains(comparableName) == false else {
+                    continue
+                }
+
+                modelContext.insert(
+                    Category(
+                        name: seed.name,
+                        kind: seed.kind,
+                        monthlyBudgetCents: seed.monthlyBudgetCents
+                    )
+                )
+            }
+
+            try modelContext.save()
+            defaults.set(true, forKey: defaultCategoriesSeedKey)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func removeIncomeDataIfNeeded() {
+        let incomeCategories = categories.filter { $0.kind == .income }
+        guard incomeCategories.isEmpty == false else {
+            return
+        }
+
+        let incomeCategoryIDs = Set(incomeCategories.map(\.id))
+
+        do {
+            let matchingRules = try modelContext.fetch(FetchDescriptor<MatchingRule>())
+
+            for transaction in transactions {
+                guard let category = transaction.category,
+                      incomeCategoryIDs.contains(category.id)
+                else {
+                    continue
+                }
+
+                transaction.category = nil
+                transaction.needsCategoryReview = true
+            }
+
+            for tag in categoryWordTags {
+                guard let category = tag.category,
+                      incomeCategoryIDs.contains(category.id)
+                else {
+                    continue
+                }
+
+                modelContext.delete(tag)
+            }
+
+            for rule in matchingRules {
+                guard let category = rule.category,
+                      incomeCategoryIDs.contains(category.id)
+                else {
+                    continue
+                }
+
+                modelContext.delete(rule)
+            }
+
+            for category in incomeCategories {
+                modelContext.delete(category)
+            }
+
+            try modelContext.save()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func updateTitleTags(
+        selectedWords: [TitleWordToken],
+        from title: String,
+        for category: Category
+    ) throws {
+        let ignoredWords = Set(ignoredTitleWords.map(\.normalizedWord))
+        let candidateWords = FinanceNormalizer.titleWords(from: title, ignoring: ignoredWords)
+        let selectedWordIDs = Set(selectedWords.map(\.normalizedWord))
+        let candidateWordIDs = Set(candidateWords.map(\.normalizedWord))
+        let selectedCandidateWords = candidateWords.filter { selectedWordIDs.contains($0.normalizedWord) }
+
+        for candidateWord in candidateWords where selectedWordIDs.contains(candidateWord.normalizedWord) == false {
+            if let existingTag = try existingCategoryWordTag(normalizedWord: candidateWord.normalizedWord),
+               existingTag.category?.id == category.id {
+                modelContext.delete(existingTag)
+            }
+        }
+
+        for word in selectedCandidateWords {
+            let existingTag = try existingCategoryWordTag(normalizedWord: word.normalizedWord)
+            let tag = existingTag ?? CategoryWordTag(
+                normalizedWord: word.normalizedWord,
+                displayWord: word.displayWord,
+                category: category
+            )
+
+            if existingTag == nil {
+                modelContext.insert(tag)
+            }
+
+            tag.displayWord = word.displayWord
+            tag.category = category
+        }
+
+        let learnedMappings: [String: Category] = Dictionary(
+            uniqueKeysWithValues: selectedCandidateWords.map { ($0.normalizedWord, category) }
+        )
+        applyCategoryWordTagsToUncategorisedTransactions(
+            additionalMappings: learnedMappings,
+            removingWords: candidateWordIDs.subtracting(selectedWordIDs)
+        )
+    }
+
+    private func applyCategoryWordTagsToUncategorisedTransactions(
+        additionalMappings: [String: Category] = [:],
+        removingWords: Set<String> = []
+    ) {
+        let ignoredWords = Set(ignoredTitleWords.map(\.normalizedWord))
+        var tagCategories: [String: Category] = Dictionary(uniqueKeysWithValues: categoryWordTags.compactMap { tag in
+            guard let category = tag.category else {
+                return nil
+            }
+
+            return (tag.normalizedWord, category)
+        })
+
+        for word in removingWords {
+            tagCategories.removeValue(forKey: word)
+        }
+
+        for (word, category) in additionalMappings {
+            tagCategories[word] = category
+        }
+
+        for transaction in transactions where transaction.category == nil {
+            if let category = matchedCategory(
+                for: transaction.title,
+                titleTagCategories: tagCategories,
+                ignoredTitleWords: ignoredWords
+            ) {
+                transaction.category = category
+                transaction.needsCategoryReview = false
+            } else {
+                transaction.needsCategoryReview = true
+            }
+        }
+    }
+
+    private func matchedCategory(
+        for title: String,
+        titleTagCategories: [String: Category],
+        ignoredTitleWords: Set<String>
+    ) -> Category? {
+        let matches = FinanceNormalizer.titleWords(from: title, ignoring: ignoredTitleWords)
+            .compactMap { titleTagCategories[$0.normalizedWord] }
+
+        guard let firstCategory = matches.first else {
+            return nil
+        }
+
+        let uniqueCategoryIDs = Set(matches.map(\.id))
+        return uniqueCategoryIDs.count == 1 ? firstCategory : nil
+    }
+
+    private func addIgnoredTitleWords(_ input: String) {
+        do {
+            let words = FinanceNormalizer.titleWords(from: input)
+            guard words.isEmpty == false else {
+                errorMessage = "Ignored words must contain letters."
+                return
+            }
+
+            for word in words {
+                if try existingIgnoredTitleWord(normalizedWord: word.normalizedWord) == nil {
+                    modelContext.insert(
+                        IgnoredTitleWord(
+                            normalizedWord: word.normalizedWord,
+                            displayWord: word.displayWord
+                        )
+                    )
+                }
+
+                if let existingTag = try existingCategoryWordTag(normalizedWord: word.normalizedWord) {
+                    modelContext.delete(existingTag)
+                }
+            }
+
+            applyCategoryWordTagsToUncategorisedTransactions(
+                removingWords: Set(words.map(\.normalizedWord))
+            )
+            try modelContext.save()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deleteIgnoredTitleWord(_ ignoredWord: IgnoredTitleWord) {
+        do {
+            modelContext.delete(ignoredWord)
+            try modelContext.save()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func deleteCategoryWordTag(_ tag: CategoryWordTag) {
+        do {
+            applyCategoryWordTagsToUncategorisedTransactions(
+                removingWords: [tag.normalizedWord]
+            )
+            modelContext.delete(tag)
+            try modelContext.save()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func existingCategoryWordTag(normalizedWord: String) throws -> CategoryWordTag? {
+        var descriptor = FetchDescriptor<CategoryWordTag>(
+            predicate: #Predicate<CategoryWordTag> { tag in
+                tag.normalizedWord == normalizedWord
+            }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
+    private func existingIgnoredTitleWord(normalizedWord: String) throws -> IgnoredTitleWord? {
+        var descriptor = FetchDescriptor<IgnoredTitleWord>(
+            predicate: #Predicate<IgnoredTitleWord> { ignoredWord in
+                ignoredWord.normalizedWord == normalizedWord
+            }
+        )
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
     private func presentReviewIfNeeded() {
         guard editingTransaction == nil else {
             return
@@ -486,10 +824,6 @@ private struct DashboardView: View {
                 total += abs(transaction.amountCents)
             }
         }
-    }
-
-    private var incomeCategories: [Category] {
-        categoriesOfKind(.income, from: categories)
     }
 
     private var expenseCategories: [Category] {
@@ -532,23 +866,6 @@ private struct DashboardView: View {
                         subtitle: "Transactions still reserved at the bank",
                         accent: .orange
                     )
-                }
-
-                if incomeCategories.isEmpty == false {
-                    GlassSection(title: "Expected income", actionTitle: "New Category", action: {
-                        onEditCategory(nil)
-                    }) {
-                        VStack(spacing: 14) {
-                            ForEach(incomeCategories) { category in
-                                BudgetRowView(
-                                    category: category,
-                                    actual: FinanceMath.budgetSpent(for: category, transactions: transactions)
-                                ) {
-                                    onEditCategory(category)
-                                }
-                            }
-                        }
-                    }
                 }
 
                 GlassSection(title: "Budget status", actionTitle: "New Category", action: {
@@ -650,66 +967,207 @@ private struct TransactionsView: View {
 private struct CategoriesView: View {
     let categories: [Category]
     let transactions: [Transaction]
+    let categoryWordTags: [CategoryWordTag]
+    let ignoredTitleWords: [IgnoredTitleWord]
     let onCreate: () -> Void
     let onEdit: (Category) -> Void
+    let onDeleteTag: (CategoryWordTag) -> Void
+    let onAddIgnoredWords: (String) -> Void
+    let onDeleteIgnoredWord: (IgnoredTitleWord) -> Void
 
-    private var incomeCategories: [Category] {
-        categoriesOfKind(.income, from: categories)
-    }
+    @State private var ignoredWordInput = ""
 
     private var expenseCategories: [Category] {
         categoriesOfKind(.expense, from: categories)
     }
 
-    var body: some View {
-        GlassSection(title: "Categories", actionTitle: "New Category", action: onCreate) {
-            if categories.isEmpty {
-                EmptyStateView(
-                    title: "No categories configured",
-                    message: "Create income categories with an expected amount or expense categories with a monthly budget.",
-                    buttonTitle: "Create Category",
-                    action: onCreate
-                )
-            } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    if incomeCategories.isEmpty == false {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Income")
-                                .font(.headline)
+    private var wordChipColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 130), spacing: 8, alignment: .leading)]
+    }
 
-                            ForEach(incomeCategories) { category in
-                                BudgetRowView(
-                                    category: category,
-                                    actual: FinanceMath.budgetSpent(for: category, transactions: transactions)
-                                ) {
-                                    onEdit(category)
+    private func tags(for category: Category) -> [CategoryWordTag] {
+        categoryWordTags.filter { $0.category?.id == category.id }
+    }
+
+    private func addIgnoredWords() {
+        let input = ignoredWordInput
+        ignoredWordInput = ""
+        onAddIgnoredWords(input)
+    }
+
+    var body: some View {
+        ScrollView {
+            GlassSection(title: "Categories", actionTitle: "New Category", action: onCreate) {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Ignored Title Words")
+                            .font(.headline)
+
+                        Text("Words in the title that should never become automatic category tags. You can add more at any time.")
+                            .foregroundStyle(.secondary)
+
+                        HStack(spacing: 10) {
+                            TextField("Add ignored word", text: $ignoredWordInput)
+                                .textFieldStyle(.roundedBorder)
+                                .onSubmit(addIgnoredWords)
+
+                            Button("Add", action: addIgnoredWords)
+                                .buttonStyle(.borderedProminent)
+                                .disabled(FinanceNormalizer.titleWords(from: ignoredWordInput).isEmpty)
+                        }
+
+                        if ignoredTitleWords.isEmpty {
+                            Text("No ignored words yet.")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                        } else {
+                            LazyVGrid(columns: wordChipColumns, alignment: .leading, spacing: 8) {
+                                ForEach(ignoredTitleWords) { ignoredWord in
+                                    RemovableWordChip(
+                                        text: ignoredWord.displayWord,
+                                        tint: .secondary
+                                    ) {
+                                        onDeleteIgnoredWord(ignoredWord)
+                                    }
                                 }
                             }
                         }
                     }
 
-                    if expenseCategories.isEmpty == false {
+                    Divider()
+
+                    if categories.isEmpty {
+                        EmptyStateView(
+                            title: "No categories configured",
+                            message: "Create expense categories with a monthly budget.",
+                            buttonTitle: "Create Category",
+                            action: onCreate
+                        )
+                    } else {
                         VStack(alignment: .leading, spacing: 12) {
-                            if incomeCategories.isEmpty == false {
-                                Divider()
-                            }
-
-                            Text("Expenses")
-                                .font(.headline)
-
                             ForEach(expenseCategories) { category in
-                                BudgetRowView(
+                                CategoryTagCard(
                                     category: category,
-                                    actual: FinanceMath.budgetSpent(for: category, transactions: transactions)
-                                ) {
-                                    onEdit(category)
-                                }
+                                    actual: FinanceMath.budgetSpent(for: category, transactions: transactions),
+                                    tags: tags(for: category),
+                                    onEdit: { onEdit(category) },
+                                    onDeleteTag: onDeleteTag
+                                )
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+private struct CategoryTagCard: View {
+    let category: Category
+    let actual: Int
+    let tags: [CategoryWordTag]
+    let onEdit: () -> Void
+    let onDeleteTag: (CategoryWordTag) -> Void
+
+    private var wordChipColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 130), spacing: 8, alignment: .leading)]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            BudgetRowView(category: category, actual: actual, onEdit: onEdit)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Title Tags")
+                    .font(.subheadline.weight(.semibold))
+
+                if tags.isEmpty {
+                    Text("No learned tags yet. Saving a categorised transaction will add the selected title words here.")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                } else {
+                    LazyVGrid(columns: wordChipColumns, alignment: .leading, spacing: 8) {
+                        ForEach(tags) { tag in
+                            RemovableWordChip(text: tag.displayWord, tint: .blue) {
+                                onDeleteTag(tag)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+        }
+    }
+}
+
+private struct RemovableWordChip: View {
+    let text: String
+    let tint: Color
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(text)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+
+            Button(role: .destructive, action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            Capsule(style: .continuous)
+                .fill(tint.opacity(0.12))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(tint.opacity(0.25), lineWidth: 1)
+        )
+        .foregroundStyle(tint)
+    }
+}
+
+private struct SelectableWordChip: View {
+    let text: String
+    let isSelected: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    private var tint: Color {
+        isSelected ? .blue : .secondary
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(text)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption.weight(.semibold))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(tint.opacity(isEnabled ? 0.12 : 0.06))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(tint.opacity(isEnabled ? 0.25 : 0.12), lineWidth: 1)
+            )
+            .foregroundStyle(isEnabled ? tint : .secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(isEnabled == false)
     }
 }
 
@@ -827,12 +1285,7 @@ private struct BudgetRowView: View {
     }
 
     private var variance: Int {
-        switch category.kind {
-        case .expense:
-            return target - actual
-        case .income:
-            return actual - target
-        }
+        target - actual
     }
 
     private var statusColor: Color {
@@ -840,38 +1293,21 @@ private struct BudgetRowView: View {
             return .secondary
         }
 
-        switch category.kind {
-        case .expense:
-            return variance >= 0 ? .green : .red
-        case .income:
-            return variance >= 0 ? .green : .orange
-        }
+        return variance >= 0 ? .green : .red
     }
 
     private var statusText: String {
         if target == 0 {
-            return category.kind.emptyTargetLabel
+            return CategoryKind.expense.emptyTargetLabel
         }
 
-        switch category.kind {
-        case .expense:
-            return variance >= 0
-                ? "\(FinanceDisplay.currency(cents: variance)) left"
-                : "\(FinanceDisplay.currency(cents: abs(variance))) over"
-        case .income:
-            return variance >= 0
-                ? "\(FinanceDisplay.currency(cents: variance)) above expected"
-                : "\(FinanceDisplay.currency(cents: abs(variance))) below expected"
-        }
+        return variance >= 0
+            ? "\(FinanceDisplay.currency(cents: variance)) left"
+            : "\(FinanceDisplay.currency(cents: abs(variance))) over"
     }
 
     private var amountLabel: String {
-        switch category.kind {
-        case .expense:
-            return "Spent"
-        case .income:
-            return "Received"
-        }
+        "Spent"
     }
 
     private var progress: Double {
@@ -1085,21 +1521,28 @@ private struct TransactionAssignmentView: View {
     let transaction: Transaction
     let categories: [Category]
     let moneyPots: [MoneyPot]
-    let onSave: (UUID?, UUID?, String, MatchingField?) -> Void
+    let categoryWordTags: [CategoryWordTag]
+    let ignoredTitleWords: [IgnoredTitleWord]
+    let onSave: (UUID?, UUID?, String, [TitleWordToken]) -> Void
 
     @State private var selectedCategoryID: UUID?
     @State private var selectedMoneyPotID: UUID?
     @State private var note: String
+    @State private var selectedTitleTagWords: Set<String> = []
 
     init(
         transaction: Transaction,
         categories: [Category],
         moneyPots: [MoneyPot],
-        onSave: @escaping (UUID?, UUID?, String, MatchingField?) -> Void
+        categoryWordTags: [CategoryWordTag],
+        ignoredTitleWords: [IgnoredTitleWord],
+        onSave: @escaping (UUID?, UUID?, String, [TitleWordToken]) -> Void
     ) {
         self.transaction = transaction
         self.categories = categories
         self.moneyPots = moneyPots
+        self.categoryWordTags = categoryWordTags
+        self.ignoredTitleWords = ignoredTitleWords
         self.onSave = onSave
         _selectedCategoryID = State(initialValue: transaction.category?.id)
         _selectedMoneyPotID = State(initialValue: transaction.moneyPot?.id)
@@ -1107,11 +1550,70 @@ private struct TransactionAssignmentView: View {
     }
 
     private var orderedCategories: [Category] {
-        sortedCategories(categories)
+        sortedCategories(categories.filter { $0.kind == .expense })
     }
 
-    private var canSaveAccountRule: Bool {
-        FinanceNormalizer.accountKey(transaction.counterpartyAccount).isEmpty == false
+    private var wordChipColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: 130), spacing: 8, alignment: .leading)]
+    }
+
+    private var candidateTitleTagWords: [TitleWordToken] {
+        FinanceNormalizer.titleWords(
+            from: transaction.title,
+            ignoring: Set(ignoredTitleWords.map(\.normalizedWord))
+        )
+    }
+
+    private var selectedCategoryTagWordIDs: Set<String> {
+        guard let selectedCategoryID else {
+            return []
+        }
+
+        return Set(
+            categoryWordTags.compactMap { tag in
+                guard tag.category?.id == selectedCategoryID else {
+                    return nil
+                }
+                return tag.normalizedWord
+            }
+        )
+    }
+
+    private var selectedTitleTagCandidates: [TitleWordToken] {
+        candidateTitleTagWords.filter { selectedTitleTagWords.contains($0.normalizedWord) }
+    }
+
+    private var canEditTitleTags: Bool {
+        selectedCategoryID != nil && candidateTitleTagWords.isEmpty == false
+    }
+
+    private var titleTagHelperText: String {
+        if candidateTitleTagWords.isEmpty {
+            return "No title words available for future category matching."
+        }
+
+        if selectedCategoryID == nil {
+            return "Choose a category first, then select the title words you want to save for future matches."
+        }
+
+        return "Only the selected title words will be saved as tags for this category."
+    }
+
+    private func syncSelectedTitleTagWords() {
+        let candidateIDs = Set(candidateTitleTagWords.map(\.normalizedWord))
+        selectedTitleTagWords = selectedCategoryTagWordIDs.intersection(candidateIDs)
+    }
+
+    private func toggleTitleTag(_ word: TitleWordToken) {
+        guard selectedCategoryID != nil else {
+            return
+        }
+
+        if selectedTitleTagWords.contains(word.normalizedWord) {
+            selectedTitleTagWords.remove(word.normalizedWord)
+        } else {
+            selectedTitleTagWords.insert(word.normalizedWord)
+        }
     }
 
     var body: some View {
@@ -1122,6 +1624,7 @@ private struct TransactionAssignmentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 DetailLine(label: "Amount", value: transaction.signedAmountText)
                 DetailLine(label: "Date", value: transaction.rawBookingDay)
+                DetailLine(label: "Title", value: transaction.title.isEmpty ? "None detected" : transaction.title)
                 DetailLine(label: "Description key", value: transaction.merchantKey)
                 DetailLine(label: "Counterparty account", value: transaction.counterpartyAccount.isEmpty ? "None detected" : transaction.counterpartyAccount)
             }
@@ -1130,7 +1633,7 @@ private struct TransactionAssignmentView: View {
                 Text("Needs category")
                     .tag(Optional<UUID>.none)
                 ForEach(orderedCategories) { category in
-                    Text(category.kind == .income ? "\(category.name) (Income)" : category.name)
+                    Text(category.name)
                         .tag(Optional(category.id))
                 }
             }
@@ -1147,6 +1650,33 @@ private struct TransactionAssignmentView: View {
             TextField("Note", text: $note, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Title Match Words")
+                    .font(.headline)
+
+                if candidateTitleTagWords.isEmpty {
+                    Text("No word candidates found in the title.")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                } else {
+                    LazyVGrid(columns: wordChipColumns, alignment: .leading, spacing: 8) {
+                        ForEach(candidateTitleTagWords) { word in
+                            SelectableWordChip(
+                                text: word.displayWord,
+                                isSelected: selectedTitleTagWords.contains(word.normalizedWord),
+                                isEnabled: canEditTitleTags
+                            ) {
+                                toggleTitleTag(word)
+                            }
+                        }
+                    }
+                }
+
+                Text(titleTagHelperText)
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+
             HStack {
                 Button("Cancel") {
                     dismiss()
@@ -1155,24 +1685,20 @@ private struct TransactionAssignmentView: View {
                 Spacer()
 
                 Button("Save") {
-                    onSave(selectedCategoryID, selectedMoneyPotID, note, nil)
-                    dismiss()
-                }
-                .buttonStyle(.bordered)
-
-                Button("Save + Description Rule") {
-                    onSave(selectedCategoryID, selectedMoneyPotID, note, .merchantKey)
-                    dismiss()
-                }
-                .buttonStyle(.bordered)
-
-                Button("Save + Account Rule") {
-                    onSave(selectedCategoryID, selectedMoneyPotID, note, .counterpartyAccount)
+                    onSave(
+                        selectedCategoryID,
+                        selectedMoneyPotID,
+                        note,
+                        selectedTitleTagCandidates
+                    )
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(canSaveAccountRule == false)
             }
+        }
+        .onAppear(perform: syncSelectedTitleTagWords)
+        .onChange(of: selectedCategoryID) { _, _ in
+            syncSelectedTitleTagWords()
         }
         .padding(28)
         .frame(minWidth: 540)
@@ -1197,17 +1723,15 @@ private struct CategoryEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     let category: Category?
-    let onSave: (String, CategoryKind, Int) -> Void
+    let onSave: (String, Int) -> Void
 
     @State private var name: String
-    @State private var selectedKind: CategoryKind
     @State private var targetAmount: String
 
-    init(category: Category?, onSave: @escaping (String, CategoryKind, Int) -> Void) {
+    init(category: Category?, onSave: @escaping (String, Int) -> Void) {
         self.category = category
         self.onSave = onSave
         _name = State(initialValue: category?.name ?? "")
-        _selectedKind = State(initialValue: category?.kind ?? .expense)
         _targetAmount = State(initialValue: FinanceDisplay.editableAmount(cents: category?.monthlyBudgetCents ?? 0))
     }
 
@@ -1222,18 +1746,9 @@ private struct CategoryEditorView: View {
 
             TextField("Name", text: $name)
 
-            Picker("Type", selection: $selectedKind) {
-                ForEach(CategoryKind.allCases) { kind in
-                    Text(kind.title)
-                        .tag(kind)
-                }
-            }
+            TextField("Monthly Budget", text: $targetAmount)
 
-            TextField(selectedKind == .income ? "Expected This Month" : "Monthly Budget", text: $targetAmount)
-
-            Text(selectedKind == .income
-                 ? "Income categories are shown above expense budgets and compare received income with your expected amount."
-                 : "Expense categories compare this month’s spending with your budget.")
+            Text("Expense categories compare this month’s spending with your budget.")
                 .foregroundStyle(.secondary)
                 .font(.caption)
 
@@ -1245,7 +1760,7 @@ private struct CategoryEditorView: View {
                 Spacer()
 
                 Button("Save") {
-                    onSave(name, selectedKind, parsedTarget ?? 0)
+                    onSave(name, parsedTarget ?? 0)
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)

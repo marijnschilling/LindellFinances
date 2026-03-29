@@ -54,11 +54,29 @@ enum CSVImportService {
                 }
                 return lhs.updatedAt > rhs.updatedAt
             }
+        let titleTagCategories: [String: Category] = Dictionary(
+            uniqueKeysWithValues: try modelContext.fetch(FetchDescriptor<CategoryWordTag>()).compactMap { tag in
+                guard let category = tag.category else {
+                    return nil
+                }
+
+                return (tag.normalizedWord, category)
+            }
+        )
+        let ignoredTitleWords = Set(
+            try modelContext.fetch(FetchDescriptor<IgnoredTitleWord>()).map(\.normalizedWord)
+        )
 
         var summary = ImportSummary()
 
         for url in urls {
-            let fileSummary = try importFile(url, into: modelContext, rules: rules)
+            let fileSummary = try importFile(
+                url,
+                into: modelContext,
+                rules: rules,
+                titleTagCategories: titleTagCategories,
+                ignoredTitleWords: ignoredTitleWords
+            )
             summary.merge(fileSummary)
         }
 
@@ -70,14 +88,22 @@ enum CSVImportService {
     private static func importFile(
         _ url: URL,
         into modelContext: ModelContext,
-        rules: [MatchingRule]
+        rules: [MatchingRule],
+        titleTagCategories: [String: Category],
+        ignoredTitleWords: Set<String>
     ) throws -> ImportSummary {
         let records = try parseTransactions(from: url)
         var summary = ImportSummary()
 
         for record in records {
             if let existing = try existingTransaction(for: record, in: modelContext) {
-                update(existing, from: record, applying: rules)
+                update(
+                    existing,
+                    from: record,
+                    applying: rules,
+                    titleTagCategories: titleTagCategories,
+                    ignoredTitleWords: ignoredTitleWords
+                )
                 summary.updated += 1
                 if existing.needsCategoryReview {
                     summary.needsReview += 1
@@ -86,7 +112,13 @@ enum CSVImportService {
             }
 
             if let pending = try matchingPendingTransaction(for: record, in: modelContext) {
-                update(pending, from: record, applying: rules)
+                update(
+                    pending,
+                    from: record,
+                    applying: rules,
+                    titleTagCategories: titleTagCategories,
+                    ignoredTitleWords: ignoredTitleWords
+                )
                 summary.updated += 1
                 if pending.needsCategoryReview {
                     summary.needsReview += 1
@@ -115,7 +147,12 @@ enum CSVImportService {
                 normalizedDescription: record.normalizedDescription,
                 merchantKey: record.merchantKey
             )
-            applyRules(to: transaction, using: rules)
+            applyRules(
+                to: transaction,
+                using: rules,
+                titleTagCategories: titleTagCategories,
+                ignoredTitleWords: ignoredTitleWords
+            )
             modelContext.insert(transaction)
             summary.inserted += 1
             if transaction.needsCategoryReview {
@@ -170,7 +207,9 @@ enum CSVImportService {
     private static func update(
         _ transaction: Transaction,
         from record: ImportedTransactionRecord,
-        applying rules: [MatchingRule]
+        applying rules: [MatchingRule],
+        titleTagCategories: [String: Category],
+        ignoredTitleWords: Set<String>
     ) {
         transaction.externalID = record.externalID
         transaction.importedAt = .now
@@ -191,10 +230,20 @@ enum CSVImportService {
         transaction.rawDescription = record.rawDescription
         transaction.normalizedDescription = record.normalizedDescription
         transaction.merchantKey = record.merchantKey
-        applyRules(to: transaction, using: rules)
+        applyRules(
+            to: transaction,
+            using: rules,
+            titleTagCategories: titleTagCategories,
+            ignoredTitleWords: ignoredTitleWords
+        )
     }
 
-    private static func applyRules(to transaction: Transaction, using rules: [MatchingRule]) {
+    private static func applyRules(
+        to transaction: Transaction,
+        using rules: [MatchingRule],
+        titleTagCategories: [String: Category],
+        ignoredTitleWords: Set<String>
+    ) {
         if let accountRule = rules.first(where: {
             $0.field == .counterpartyAccount &&
             $0.pattern == FinanceNormalizer.accountKey(transaction.counterpartyAccount) &&
@@ -221,7 +270,32 @@ enum CSVImportService {
             }
         }
 
+        if transaction.category == nil,
+           let titleWordCategory = matchedCategory(
+               for: transaction.title,
+               titleTagCategories: titleTagCategories,
+               ignoredTitleWords: ignoredTitleWords
+           ) {
+            transaction.category = titleWordCategory
+        }
+
         transaction.needsCategoryReview = transaction.category == nil
+    }
+
+    private static func matchedCategory(
+        for title: String,
+        titleTagCategories: [String: Category],
+        ignoredTitleWords: Set<String>
+    ) -> Category? {
+        let matchedCategories = FinanceNormalizer.titleWords(from: title, ignoring: ignoredTitleWords)
+            .compactMap { titleTagCategories[$0.normalizedWord] }
+
+        guard let firstCategory = matchedCategories.first else {
+            return nil
+        }
+
+        let uniqueCategoryIDs = Set(matchedCategories.map(\.id))
+        return uniqueCategoryIDs.count == 1 ? firstCategory : nil
     }
 
     nonisolated private static func parseTransactions(from url: URL) throws -> [ImportedTransactionRecord] {
